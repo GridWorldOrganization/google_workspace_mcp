@@ -4,13 +4,13 @@
 
 ## このフォークについて / About This Fork
 
-> **日本語**
->
-> これは [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) のフォークです。
-> オリジナルには Google スプレッドシートの**列幅・行の高さを変更する機能**が存在しなかったため、
-> `resize_sheet_dimensions` ツールを独自に追加しました。
-> このツールは Sheets API の `updateDimensionProperties` を使用し、
-> 指定したシートの列幅または行の高さをピクセル単位で変更します。
+**日本語**
+
+これは [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) のフォークです。
+オリジナルには Google スプレッドシートの**列幅・行の高さを変更する機能**が存在しなかったため、
+`resize_sheet_dimensions` ツールを独自に追加しました。
+このツールは Sheets API の `updateDimensionProperties` を使用し、
+指定したシートの列幅または行の高さをピクセル単位で変更します。
 
 > **English**
 >
