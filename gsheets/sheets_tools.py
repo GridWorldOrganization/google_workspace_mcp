@@ -1379,6 +1379,63 @@ async def get_sheet_dimension_sizes(
     return text_output
 
 
+@server.tool()
+@handle_http_errors("list_spreadsheet_revisions", is_read_only=True, service_type="sheets")
+@require_google_service("drive", "drive_read")
+async def list_spreadsheet_revisions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    max_results: int = 10,
+) -> str:
+    """
+    Lists the revision history of a Google Spreadsheet using the Drive API.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        max_results (int): Maximum number of revisions to return (most recent first). Defaults to 10.
+
+    Returns:
+        str: Formatted list of revisions including time, modifier, and whether it was a named version.
+    """
+    logger.info(
+        f"[list_spreadsheet_revisions] Invoked. Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}"
+    )
+
+    response = await asyncio.to_thread(
+        service.revisions()
+        .list(
+            fileId=spreadsheet_id,
+            fields="revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress),keepForever,published)",
+        )
+        .execute
+    )
+
+    revisions = response.get("revisions", [])
+    if not revisions:
+        return f"No revisions found for spreadsheet {spreadsheet_id}."
+
+    # Most recent first
+    revisions = list(reversed(revisions))[:max_results]
+
+    lines = []
+    for rev in revisions:
+        user_info = rev.get("lastModifyingUser", {})
+        name = user_info.get("displayName", "Unknown")
+        email = user_info.get("emailAddress", "")
+        modified = rev.get("modifiedTime", "Unknown")
+        rev_id = rev.get("id", "?")
+        lines.append(f"  Revision {rev_id} | {modified} | {name} <{email}>")
+
+    text_output = (
+        f"Revision history for spreadsheet {spreadsheet_id} "
+        f"(showing {len(lines)} most recent):\n" + "\n".join(lines)
+    )
+    logger.info(f"Listed {len(lines)} revisions for spreadsheet {spreadsheet_id}.")
+    return text_output
+
+
 # Create comment management tools for sheets
 _comment_tools = create_comment_tools("spreadsheet", "spreadsheet_id")
 
