@@ -1,5 +1,27 @@
 <!-- mcp-name: io.github.taylorwilsdon/workspace-mcp -->
 
+---
+
+## このフォークについて / About This Fork
+
+> **日本語**
+>
+> これは [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) のフォークです。
+> オリジナルには Google スプレッドシートの**列幅・行の高さを変更する機能**が存在しなかったため、
+> `resize_sheet_dimensions` ツールを独自に追加しました。
+> このツールは Sheets API の `updateDimensionProperties` を使用し、
+> 指定したシートの列幅または行の高さをピクセル単位で変更します。
+
+> **English**
+>
+> This is a fork of [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp).
+> The original project lacked the ability to **resize column widths and row heights** in Google Sheets,
+> so we added a new `resize_sheet_dimensions` tool.
+> It uses the Sheets API `updateDimensionProperties` endpoint to set the pixel size
+> of any column or row range in a given sheet.
+
+---
+
 <div align="center">
 
 # <span style="color:#cad8d9">Google Workspace MCP Server</span> <img src="https://github.com/user-attachments/assets/b89524e4-6e6e-49e6-ba77-00d6df0c6e5c" width="80" align="right" />

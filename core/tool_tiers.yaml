@@ -82,6 +82,7 @@ sheets:
     - format_sheet_range
   complete:
     - create_sheet
+    - resize_sheet_dimensions
     - list_spreadsheet_comments
     - manage_spreadsheet_comment
     - manage_conditional_formatting

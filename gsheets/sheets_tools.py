@@ -1197,6 +1197,99 @@ async def create_sheet(
     return text_output
 
 
+@server.tool()
+@handle_http_errors("resize_sheet_dimensions", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def resize_sheet_dimensions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+    pixel_size: int,
+) -> str:
+    """
+    Resizes column widths or row heights in a Google Sheet using the Sheets API batchUpdate.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet to resize. Required.
+        dimension (str): Either "COLUMNS" or "ROWS". Required.
+        start_index (int): 0-based start index of the column/row range (A=0, B=1, ...). Required.
+        end_index (int): 0-based end index (exclusive) of the column/row range. Required.
+        pixel_size (int): The new size in pixels for the columns or rows. Required.
+
+    Returns:
+        str: Confirmation message of the successful resize.
+    """
+    logger.info(
+        f"[resize_sheet_dimensions] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Dimension: {dimension}, Range: {start_index}-{end_index}, Pixels: {pixel_size}"
+    )
+
+    dimension = dimension.upper()
+    if dimension not in ("COLUMNS", "ROWS"):
+        raise UserInputError("dimension must be 'COLUMNS' or 'ROWS'")
+    if pixel_size <= 0:
+        raise UserInputError("pixel_size must be a positive integer")
+    if start_index < 0 or end_index <= start_index:
+        raise UserInputError("start_index must be >= 0 and end_index must be > start_index")
+
+    # Resolve sheet name to sheetId
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,sheetId))",
+        )
+        .execute
+    )
+    sheet_id = None
+    for sheet in spreadsheet.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == sheet_name:
+            sheet_id = props.get("sheetId")
+            break
+    if sheet_id is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    request_body = {
+        "requests": [
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": dimension,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                    "properties": {"pixelSize": pixel_size},
+                    "fields": "pixelSize",
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    label = "column(s)" if dimension == "COLUMNS" else "row(s)"
+    text_output = (
+        f"Successfully resized {label} {start_index} to {end_index} (exclusive) "
+        f"to {pixel_size}px in sheet '{sheet_name}' "
+        f"(spreadsheet {spreadsheet_id}) for {user_google_email}."
+    )
+    logger.info(text_output)
+    return text_output
+
+
 # Create comment management tools for sheets
 _comment_tools = create_comment_tools("spreadsheet", "spreadsheet_id")
 
