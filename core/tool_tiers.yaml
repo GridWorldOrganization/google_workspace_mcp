@@ -85,6 +85,7 @@ sheets:
     - resize_sheet_dimensions
     - get_sheet_dimension_sizes
     - auto_resize_sheet_dimensions
+    - fit_columns_to_content
     - list_spreadsheet_revisions
     - list_spreadsheet_comments
     - manage_spreadsheet_comment

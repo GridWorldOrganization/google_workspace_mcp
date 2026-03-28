@@ -1471,6 +1471,155 @@ async def auto_resize_sheet_dimensions(
     return text_output
 
 
+def _estimate_col_width(text: str, font_size: int, bold: bool) -> int:
+    """Estimate column pixel width for a cell's text based on font size and content."""
+    if not text:
+        return 0
+    # Google Sheets default rendering at 96dpi: 1pt ≈ 1.333px
+    # CJK/full-width chars are square (width ≈ height); ASCII chars are ~60% of height.
+    pt_to_px = 1.333
+    char_height_px = font_size * pt_to_px
+    bold_factor = 1.1 if bold else 1.0
+    width = 0
+    for ch in text:
+        cp = ord(ch)
+        # CJK Unified Ideographs, Hiragana, Katakana, full-width forms
+        if (0x3000 <= cp <= 0x9FFF) or (0xF900 <= cp <= 0xFAFF) or (0xFF00 <= cp <= 0xFFEF):
+            width += char_height_px * bold_factor
+        else:
+            width += char_height_px * 0.6 * bold_factor
+    return int(width) + 16  # 8px padding each side
+
+
+@server.tool()
+@handle_http_errors("fit_columns_to_content", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def fit_columns_to_content(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    start_col_index: int,
+    end_col_index: int,
+    check_rows: int = 100,
+    min_width: int = 50,
+    skip_empty: bool = True,
+) -> str:
+    """
+    Resizes column widths to fit their content by fetching cell values and font sizes,
+    then calculating accurate pixel widths. More reliable than autoResizeDimensions.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        start_col_index (int): 0-based start column index (A=0). Required.
+        end_col_index (int): 0-based end column index (exclusive). Required.
+        check_rows (int): Number of rows to scan for content. Defaults to 100.
+        min_width (int): Minimum column width in pixels. Defaults to 50.
+        skip_empty (bool): If True, skip columns with no content. Defaults to True.
+
+    Returns:
+        str: Summary of column widths applied.
+    """
+    logger.info(
+        f"[fit_columns_to_content] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Cols: {start_col_index}-{end_col_index}"
+    )
+
+    if start_col_index < 0 or end_col_index <= start_col_index:
+        raise UserInputError("start_col_index must be >= 0 and end_col_index must be > start_col_index")
+
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def col_letter(i):
+        return col_letters[i] if i < 26 else str(i)
+
+    range_str = f"{sheet_name}!{col_letter(start_col_index)}1:{col_letter(end_col_index - 1)}{check_rows}"
+
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            ranges=[range_str],
+            includeGridData=True,
+            fields=(
+                "sheets(properties(title,sheetId),"
+                "data(rowData(values(formattedValue,effectiveFormat(textFormat(fontSize,bold))))))"
+            ),
+        )
+        .execute
+    )
+
+    # Find target sheet
+    target_sheet = None
+    for sheet in spreadsheet.get("sheets", []):
+        if sheet.get("properties", {}).get("title") == sheet_name:
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    sheet_id = target_sheet["properties"]["sheetId"]
+    num_cols = end_col_index - start_col_index
+    max_widths = [0] * num_cols
+
+    for row_data in target_sheet.get("data", [{}])[0].get("rowData", []):
+        for rel_idx, cell in enumerate(row_data.get("values", [])):
+            if rel_idx >= num_cols:
+                break
+            text = cell.get("formattedValue", "") or ""
+            fmt = cell.get("effectiveFormat", {}).get("textFormat", {})
+            font_size = fmt.get("fontSize") or 10
+            bold = fmt.get("bold", False)
+            w = _estimate_col_width(text, font_size, bold)
+            if w > max_widths[rel_idx]:
+                max_widths[rel_idx] = w
+
+    requests = []
+    skipped = []
+    applied = []
+
+    for rel_idx in range(num_cols):
+        abs_idx = start_col_index + rel_idx
+        label = col_letter(abs_idx)
+        if skip_empty and max_widths[rel_idx] == 0:
+            skipped.append(label)
+            continue
+        final_width = max(max_widths[rel_idx], min_width)
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": abs_idx,
+                    "endIndex": abs_idx + 1,
+                },
+                "properties": {"pixelSize": final_width},
+                "fields": "pixelSize",
+            }
+        })
+        applied.append(f"{label}:{final_width}px")
+
+    if requests:
+        await asyncio.to_thread(
+            service.spreadsheets()
+            .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+            .execute
+        )
+
+    lines = [f"fit_columns_to_content complete for sheet '{sheet_name}':"]
+    if applied:
+        lines.append("  Applied: " + ", ".join(applied))
+    if skipped:
+        lines.append("  Skipped (empty): " + ", ".join(skipped))
+
+    text_output = "\n".join(lines)
+    logger.info(text_output)
+    return text_output
+
+
 @server.tool()
 @handle_http_errors("list_spreadsheet_revisions", is_read_only=True, service_type="sheets")
 @require_google_service("drive", "drive_read")
