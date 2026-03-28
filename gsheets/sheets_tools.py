@@ -1380,6 +1380,98 @@ async def get_sheet_dimension_sizes(
 
 
 @server.tool()
+@handle_http_errors("auto_resize_sheet_dimensions", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def auto_resize_sheet_dimensions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+) -> str:
+    """
+    Auto-resizes columns or rows to fit their content using the Sheets API autoResizeDimensions.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        dimension (str): Either "COLUMNS" or "ROWS". Required.
+        start_index (int): 0-based start index (A=0, B=1, ...). Required.
+        end_index (int): 0-based end index (exclusive). Required.
+
+    Returns:
+        str: Confirmation message of the successful auto-resize.
+    """
+    logger.info(
+        f"[auto_resize_sheet_dimensions] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Dimension: {dimension}, Range: {start_index}-{end_index}"
+    )
+
+    dimension = dimension.upper()
+    if dimension not in ("COLUMNS", "ROWS"):
+        raise UserInputError("dimension must be 'COLUMNS' or 'ROWS'")
+    if start_index < 0 or end_index <= start_index:
+        raise UserInputError("start_index must be >= 0 and end_index must be > start_index")
+
+    # Resolve sheet name to sheetId
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,sheetId))",
+        )
+        .execute
+    )
+    sheet_id = None
+    for sheet in spreadsheet.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == sheet_name:
+            sheet_id = props.get("sheetId")
+            break
+    if sheet_id is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    request_body = {
+        "requests": [
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": sheet_id,
+                        "dimension": dimension,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    }
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    label = "column(s)" if dimension == "COLUMNS" else "row(s)"
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if dimension == "COLUMNS" and end_index <= 26:
+        range_label = f"{col_letters[start_index]}〜{col_letters[end_index - 1]}"
+    else:
+        range_label = f"index {start_index}〜{end_index - 1}"
+
+    text_output = (
+        f"Successfully auto-resized {label} {range_label} to fit content "
+        f"in sheet '{sheet_name}' (spreadsheet {spreadsheet_id}) for {user_google_email}."
+    )
+    logger.info(text_output)
+    return text_output
+
+
+@server.tool()
 @handle_http_errors("list_spreadsheet_revisions", is_read_only=True, service_type="sheets")
 @require_google_service("drive", "drive_read")
 async def list_spreadsheet_revisions(
