@@ -7,18 +7,29 @@
 **日本語**
 
 これは [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) のフォークです。
-オリジナルには Google スプレッドシートの**列幅・行の高さを変更する機能**が存在しなかったため、
-`resize_sheet_dimensions` ツールを独自に追加しました。
-このツールは Sheets API の `updateDimensionProperties` を使用し、
-指定したシートの列幅または行の高さをピクセル単位で変更します。
+オリジナルには Google スプレッドシートの**列幅・行の高さを変更・取得する機能**が存在しなかったため、
+以下の2つのツールを独自に追加しました。
+
+| ツール名 | 説明 |
+|---|---|
+| `resize_sheet_dimensions` | 指定した列/行のピクセルサイズを変更する |
+| `get_sheet_dimension_sizes` | 指定した列/行の現在のピクセルサイズを取得する |
+
+どちらも Sheets API の `updateDimensionProperties` / `spreadsheets.get` を使用し、
+列幅・行の高さをピクセル単位で操作します。
 
 > **English**
 >
 > This is a fork of [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp).
-> The original project lacked the ability to **resize column widths and row heights** in Google Sheets,
-> so we added a new `resize_sheet_dimensions` tool.
-> It uses the Sheets API `updateDimensionProperties` endpoint to set the pixel size
-> of any column or row range in a given sheet.
+> The original project lacked the ability to **resize and inspect column widths / row heights** in Google Sheets,
+> so we added the following two tools:
+>
+> | Tool | Description |
+> |---|---|
+> | `resize_sheet_dimensions` | Set the pixel size of a column/row range |
+> | `get_sheet_dimension_sizes` | Get the current pixel size of a column/row range |
+>
+> They use the Sheets API `updateDimensionProperties` / `spreadsheets.get` endpoints respectively.
 
 ---
 
