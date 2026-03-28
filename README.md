@@ -28,6 +28,9 @@ UI の **Ctrl+Z（元に戻す）スタックには積まれません**。
 | UI での手動操作 | ✓ | ✓ |
 | Sheets API (`batchUpdate`) | ✓ | ✗ |
 
+> 💡 Ctrl+Z では元に戻せませんが、バージョン履歴には記録されるため、
+> **「ファイル → 変更履歴を表示 → 変更履歴を表示」から過去のリビジョンに復元することは可能です。**
+
 ---
 
 ### インストール方法 / Installation
@@ -80,6 +83,9 @@ uv sync
 > |---|---|---|
 > | Manual UI operation | ✓ | ✓ |
 > | Sheets API (`batchUpdate`) | ✓ | ✗ |
+>
+> > 💡 While Ctrl+Z is not available, changes are recorded in version history.
+> > You can revert to a previous state via **"File → Version history → See version history"**.
 >
 > ---
 >
