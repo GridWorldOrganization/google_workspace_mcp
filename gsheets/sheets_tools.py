@@ -1290,6 +1290,95 @@ async def resize_sheet_dimensions(
     return text_output
 
 
+@server.tool()
+@handle_http_errors("get_sheet_dimension_sizes", is_read_only=True, service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_sheet_dimension_sizes(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+) -> str:
+    """
+    Gets the pixel sizes of columns or rows in a Google Sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        dimension (str): Either "COLUMNS" or "ROWS". Required.
+        start_index (int): 0-based start index (A=0, B=1, ...). Required.
+        end_index (int): 0-based end index (exclusive). Required.
+
+    Returns:
+        str: The pixel sizes of each column or row in the specified range.
+    """
+    logger.info(
+        f"[get_sheet_dimension_sizes] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Dimension: {dimension}, Range: {start_index}-{end_index}"
+    )
+
+    dimension = dimension.upper()
+    if dimension not in ("COLUMNS", "ROWS"):
+        raise UserInputError("dimension must be 'COLUMNS' or 'ROWS'")
+    if start_index < 0 or end_index <= start_index:
+        raise UserInputError("start_index must be >= 0 and end_index must be > start_index")
+
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=False,
+            fields="sheets(properties(title,sheetId),columnGroups,rowGroups,data(columnMetadata,rowMetadata))",
+        )
+        .execute
+    )
+
+    # Find target sheet
+    target_sheet = None
+    for sheet in spreadsheet.get("sheets", []):
+        if sheet.get("properties", {}).get("title") == sheet_name:
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    # Extract metadata for the requested range
+    data_list = target_sheet.get("data", [])
+    metadata_key = "columnMetadata" if dimension == "COLUMNS" else "rowMetadata"
+    metadata = []
+    for data in data_list:
+        metadata = data.get(metadata_key, [])
+        break  # first GridData block
+
+    lines = []
+    label_prefix = "Column" if dimension == "COLUMNS" else "Row"
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    for i in range(start_index, end_index):
+        if i < len(metadata):
+            px = metadata[i].get("pixelSize", "(unknown)")
+        else:
+            px = "(default — not explicitly set)"
+
+        if dimension == "COLUMNS" and i < 26:
+            label = f"{label_prefix} {col_letters[i]} (index {i})"
+        else:
+            label = f"{label_prefix} {i}"
+        lines.append(f"  {label}: {px}px")
+
+    text_output = (
+        f"Dimension sizes for sheet '{sheet_name}' [{dimension}] "
+        f"index {start_index} to {end_index - 1}:\n" + "\n".join(lines)
+    )
+    logger.info(text_output)
+    return text_output
+
+
 # Create comment management tools for sheets
 _comment_tools = create_comment_tools("spreadsheet", "spreadsheet_id")
 
