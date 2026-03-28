@@ -12,7 +12,8 @@
 
 | ツール名 | 説明 |
 |---|---|
-| `resize_sheet_dimensions` | 指定した列/行のピクセルサイズを変更する |
+| `resize_sheet_dimensions` | 指定した列/行のピクセルサイズを手動で変更する |
+| `auto_resize_sheet_dimensions` | 指定した列/行をコンテンツの幅に合わせて自動リサイズする |
 | `get_sheet_dimension_sizes` | 指定した列/行の現在のピクセルサイズを取得する |
 | `list_spreadsheet_revisions` | スプレッドシートのリビジョン履歴を一覧表示する |
 
@@ -69,7 +70,8 @@ uv sync
 >
 > | Tool | Description |
 > |---|---|
-> | `resize_sheet_dimensions` | Set the pixel size of a column/row range |
+> | `resize_sheet_dimensions` | Manually set the pixel size of a column/row range |
+> | `auto_resize_sheet_dimensions` | Auto-resize columns/rows to fit their content |
 > | `get_sheet_dimension_sizes` | Get the current pixel size of a column/row range |
 > | `list_spreadsheet_revisions` | List the revision history of a spreadsheet |
 >
