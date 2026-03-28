@@ -8,28 +8,105 @@
 
 これは [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp) のフォークです。
 オリジナルには Google スプレッドシートの**列幅・行の高さを変更・取得する機能**が存在しなかったため、
-以下の2つのツールを独自に追加しました。
+以下のツールを独自に追加しました。
 
 | ツール名 | 説明 |
 |---|---|
 | `resize_sheet_dimensions` | 指定した列/行のピクセルサイズを変更する |
 | `get_sheet_dimension_sizes` | 指定した列/行の現在のピクセルサイズを取得する |
+| `list_spreadsheet_revisions` | スプレッドシートのリビジョン履歴を一覧表示する |
 
-どちらも Sheets API の `updateDimensionProperties` / `spreadsheets.get` を使用し、
-列幅・行の高さをピクセル単位で操作します。
+**⚠️ API 変更と Ctrl+Z について**
+
+Sheets API 経由の変更（`resize_sheet_dimensions` など）は、Google スプレッドシートの
+**「ファイル → 変更履歴を表示」には記録されます**が、
+UI の **Ctrl+Z（元に戻す）スタックには積まれません**。
+これは Google Sheets プラットフォームの仕様であり、API 側からの回避は不可能です。
+
+| 操作方法 | バージョン履歴に残る | Ctrl+Z で戻せる |
+|---|---|---|
+| UI での手動操作 | ✓ | ✓ |
+| Sheets API (`batchUpdate`) | ✓ | ✗ |
+
+---
+
+### インストール方法 / Installation
+
+リポジトリをクローンし、`uv sync` で依存関係をインストール後、
+`claude mcp add` コマンドで MCP サーバーとして登録します。
+
+```bash
+git clone https://github.com/GridWorldOrganization/google_workspace_mcp
+cd google_workspace_mcp
+uv sync
+```
+
+**スコープの選択:**
+
+| スコープ | コマンド例 | 用途 |
+|---|---|---|
+| ユーザー全体（全プロジェクトで使用可） | `claude mcp add workspace-mcp-plus --scope user -- uv --directory /path/to/google_workspace_mcp run workspace-mcp --single-user --tool-tier complete` | 複数プロジェクトをまたいで使いたい場合 |
+| プロジェクト限定（`.mcp.json` に保存） | `claude mcp add workspace-mcp-plus --scope project -- uv --directory /path/to/google_workspace_mcp run workspace-mcp --single-user --tool-tier complete` | 特定プロジェクト内のみで使いたい場合 |
+
+**`--tool-tier` オプション:**
+
+| 値 | 説明 |
+|---|---|
+| `core` | 基本的な読み取り・書き込みツールのみ |
+| `extended` | `core` に加えてスプレッドシート一覧・情報取得・書式変更など |
+| `complete` | すべてのツールを有効化（`resize_sheet_dimensions` などもこれが必要） |
+
+---
 
 > **English**
 >
 > This is a fork of [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp).
 > The original project lacked the ability to **resize and inspect column widths / row heights** in Google Sheets,
-> so we added the following two tools:
+> so we added the following tools:
 >
 > | Tool | Description |
 > |---|---|
 > | `resize_sheet_dimensions` | Set the pixel size of a column/row range |
 > | `get_sheet_dimension_sizes` | Get the current pixel size of a column/row range |
+> | `list_spreadsheet_revisions` | List the revision history of a spreadsheet |
 >
-> They use the Sheets API `updateDimensionProperties` / `spreadsheets.get` endpoints respectively.
+> **⚠️ API changes and Ctrl+Z**
+>
+> Changes made via the Sheets API (e.g. `resize_sheet_dimensions`) **do appear in
+> "File → Version history"**, but are **not added to the Ctrl+Z undo stack**.
+> This is a Google Sheets platform limitation and cannot be worked around via the API.
+>
+> | Method | Appears in version history | Ctrl+Z undoable |
+> |---|---|---|
+> | Manual UI operation | ✓ | ✓ |
+> | Sheets API (`batchUpdate`) | ✓ | ✗ |
+>
+> ---
+>
+> ### Installation
+>
+> Clone the repository, run `uv sync`, then register as an MCP server with `claude mcp add`.
+>
+> ```bash
+> git clone https://github.com/GridWorldOrganization/google_workspace_mcp
+> cd google_workspace_mcp
+> uv sync
+> ```
+>
+> **Scope options:**
+>
+> | Scope | Command | When to use |
+> |---|---|---|
+> | User-wide (available in all projects) | `claude mcp add workspace-mcp-plus --scope user -- uv --directory /path/to/google_workspace_mcp run workspace-mcp --single-user --tool-tier complete` | Use across multiple projects |
+> | Project-only (saved in `.mcp.json`) | `claude mcp add workspace-mcp-plus --scope project -- uv --directory /path/to/google_workspace_mcp run workspace-mcp --single-user --tool-tier complete` | Limit to a specific project |
+>
+> **`--tool-tier` options:**
+>
+> | Value | Description |
+> |---|---|
+> | `core` | Basic read/write tools only |
+> | `extended` | Adds spreadsheet listing, info, and formatting tools |
+> | `complete` | All tools enabled (required for `resize_sheet_dimensions` etc.) |
 
 ---
 
