@@ -338,37 +338,84 @@ async def list_docs_in_folder(
 
 @server.tool()
 @handle_http_errors("create_doc", service_type="docs")
-@require_google_service("docs", "docs_write")
+@require_multiple_services(
+    [
+        {
+            "service_type": "drive",
+            "scopes": "drive_file",
+            "param_name": "drive_service",
+        },
+        {
+            "service_type": "docs",
+            "scopes": "docs_write",
+            "param_name": "docs_service",
+        },
+    ]
+)
 async def create_doc(
-    service: Any,
+    drive_service: Any,
+    docs_service: Any,
     user_google_email: str,
     title: str,
     content: str = "",
+    folder_id: Optional[str] = None,
 ) -> str:
     """
     Creates a new Google Doc and optionally inserts initial content.
+    Supports creating in shared drives by specifying folder_id.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        title (str): The title for the new document.
+        content (str): Optional initial text content to insert.
+        folder_id (Optional[str]): Drive folder ID to create the doc in. Supports shared drives.
+            If not provided, creates in the user's My Drive root.
 
     Returns:
         str: Confirmation message with document ID and link.
     """
-    logger.info(f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}'")
-
-    doc = await asyncio.to_thread(
-        service.documents().create(body={"title": title}).execute
+    logger.info(
+        f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}', folder_id={folder_id}"
     )
-    doc_id = doc.get("documentId")
+
+    if folder_id:
+        # Use Drive API to create doc in a specific folder (supports shared drives)
+        from gdrive.drive_helpers import resolve_folder_id
+        resolved_folder_id = await resolve_folder_id(drive_service, folder_id)
+        file_metadata = {
+            "name": title,
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": [resolved_folder_id],
+        }
+        created_file = await asyncio.to_thread(
+            drive_service.files()
+            .create(
+                body=file_metadata,
+                fields="id, name, webViewLink, parents",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
+        doc_id = created_file.get("id")
+    else:
+        # Use Docs API (original behavior - creates in My Drive root)
+        doc = await asyncio.to_thread(
+            docs_service.documents().create(body={"title": title}).execute
+        )
+        doc_id = doc.get("documentId")
+
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
         await asyncio.to_thread(
-            service.documents()
+            docs_service.documents()
             .batchUpdate(documentId=doc_id, body={"requests": requests})
             .execute
         )
+
     link = f"https://docs.google.com/document/d/{doc_id}/edit"
-    msg = f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}"
-    logger.info(
-        f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}"
-    )
+    folder_info = f" in folder {folder_id}" if folder_id else ""
+    msg = f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}{folder_info}. Link: {link}"
+    logger.info(f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}{folder_info}. Link: {link}")
     return msg
 
 
