@@ -10,7 +10,7 @@ import json
 import copy
 from typing import List, Optional, Union
 
-from auth.service_decorator import require_google_service
+from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
 from core.utils import handle_http_errors, UserInputError, StringList
 from core.comments import create_comment_tools
@@ -1101,26 +1101,44 @@ async def manage_conditional_formatting(
 
 @server.tool()
 @handle_http_errors("create_spreadsheet", service_type="sheets")
-@require_google_service("sheets", "sheets_write")
+@require_multiple_services(
+    [
+        {
+            "service_type": "sheets",
+            "scopes": "sheets_write",
+            "param_name": "sheets_service",
+        },
+        {
+            "service_type": "drive",
+            "scopes": "drive_file",
+            "param_name": "drive_service",
+        },
+    ]
+)
 async def create_spreadsheet(
-    service,
+    sheets_service,
+    drive_service,
     user_google_email: str,
     title: str,
     sheet_names: Optional[StringList] = None,
+    folder_id: Optional[str] = None,
 ) -> str:
     """
     Creates a new Google Spreadsheet.
+    Supports creating in shared drives by specifying folder_id.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
         title (str): The title of the new spreadsheet. Required.
         sheet_names (Optional[List[str]]): List of sheet names to create. If not provided, creates one sheet with default name.
+        folder_id (Optional[str]): Drive folder ID to place the spreadsheet in. Supports shared drives.
+            If not provided, creates in the user's My Drive root.
 
     Returns:
         str: Information about the newly created spreadsheet including ID, URL, and locale.
     """
     logger.info(
-        f"[create_spreadsheet] Invoked. Email: '{user_google_email}', Title: {title}"
+        f"[create_spreadsheet] Invoked. Email: '{user_google_email}', Title: {title}, folder_id={folder_id}"
     )
 
     spreadsheet_body = {"properties": {"title": title}}
@@ -1131,7 +1149,7 @@ async def create_spreadsheet(
         ]
 
     spreadsheet = await asyncio.to_thread(
-        service.spreadsheets()
+        sheets_service.spreadsheets()
         .create(
             body=spreadsheet_body,
             fields="spreadsheetId,spreadsheetUrl,properties(title,locale)",
@@ -1144,13 +1162,29 @@ async def create_spreadsheet(
     spreadsheet_url = spreadsheet.get("spreadsheetUrl")
     locale = properties.get("locale", "Unknown")
 
+    if folder_id:
+        from gdrive.drive_helpers import resolve_folder_id
+        resolved_folder_id = await resolve_folder_id(drive_service, folder_id)
+        await asyncio.to_thread(
+            drive_service.files()
+            .update(
+                fileId=spreadsheet_id,
+                addParents=resolved_folder_id,
+                removeParents="root",
+                fields="id, parents",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
+
+    folder_info = f" in folder {folder_id}" if folder_id else ""
     text_output = (
-        f"Successfully created spreadsheet '{title}' for {user_google_email}. "
+        f"Successfully created spreadsheet '{title}' for {user_google_email}{folder_info}. "
         f"ID: {spreadsheet_id} | URL: {spreadsheet_url} | Locale: {locale}"
     )
 
     logger.info(
-        f"Successfully created spreadsheet for {user_google_email}. ID: {spreadsheet_id}"
+        f"Successfully created spreadsheet for {user_google_email}{folder_info}. ID: {spreadsheet_id}"
     )
     return text_output
 
