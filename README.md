@@ -1007,7 +1007,8 @@ Saved files expire after 1 hour and are cleaned up automatically.
 | `create_doc` | **Core** | Create new documents |
 | `modify_doc_text` | **Core** | Modify document text (formatting + links) |
 | `search_docs` | Extended | Find documents by name |
-| `find_and_replace_doc` | Extended | Find and replace text |
+| `find_and_replace_doc` | Extended | Find and replace text (replaces ALL occurrences) |
+| `replace_text_in_section` | Extended | Replace a single occurrence scoped after a section marker |
 | `list_docs_in_folder` | Extended | List docs in folder |
 | `insert_doc_elements` | Extended | Add tables, lists, page breaks |
 | `update_paragraph_style` | Extended | Apply heading styles, lists (bulleted/numbered with nesting), and paragraph formatting |
@@ -1021,6 +1022,49 @@ Saved files expire after 1 hour and are cleaned up automatically.
 | `debug_table_structure` | Complete | Debug table issues |
 | `list_document_comments` | Complete | List all document comments |
 | `manage_document_comment` | Complete | Create, reply to, or resolve comments |
+
+#### Targeted text updates — choosing the right tool
+
+Google Docs has **no concept of pages** at the API level; everything is addressed by character indices. Picking the right update tool depends on whether your target text is unique and how precise you need the match to be.
+
+| Goal | Use | Example |
+|------|-----|---------|
+| Replace **every** occurrence | `find_and_replace_doc` | `find_text="v1.0"` → every "v1.0" in the doc becomes "v2.0" |
+| Replace **one specific** occurrence by unique context | `find_and_replace_doc` (with unique phrase) | `find_text="【Ch.3】v1.0 spec"` — surround the target with unique words |
+| Replace **the first match after a section heading** | `replace_text_in_section` | `section_marker="## Status"`, `find_text="TBD"` → only the first TBD after the heading is updated |
+| Replace by **exact character range** | `modify_doc_text` / `batch_update_doc` | Use `inspect_doc_structure` first to find `start_index` / `end_index` |
+
+**Examples**
+
+Replace ALL occurrences (existing behavior):
+```python
+find_and_replace_doc(
+    document_id="1abc...",
+    find_text="v1.0",
+    replace_text="v2.0",
+)
+```
+
+Replace only the first "TBD" that appears after a "## Status" heading:
+```python
+replace_text_in_section(
+    document_id="1abc...",
+    section_marker="## Status",
+    find_text="TBD",
+    replace_text="Shipped",
+    occurrence=1,   # N-th match after the marker (default 1)
+)
+```
+
+Replace by character range (when you already know the indices):
+```python
+modify_doc_text(
+    document_id="1abc...",
+    start_index=420,
+    end_index=450,
+    text="new content",
+)
+```
 
 </td>
 </tr>

@@ -14,7 +14,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Auth & server utilities
 from auth.service_decorator import require_google_service, require_multiple_services
-from core.utils import extract_office_xml_text, handle_http_errors
+from core.utils import extract_office_xml_text, handle_http_errors, UserInputError
 from core.server import server
 from core.comments import create_comment_tools
 
@@ -632,13 +632,31 @@ async def find_and_replace_doc(
     """
     Finds and replaces text throughout a Google Doc.
 
+    SCOPE: Replaces ALL matching occurrences in the document (or within the
+    specified tab). There is no concept of "pages" at the Docs API level.
+
+    To target only specific locations, choose one of these strategies:
+
+    1. Make find_text unique by including surrounding context.
+       Example: instead of find_text="v1.0" (which might match many times),
+       use find_text="【Chapter 3】v1.0 spec" to scope to one location.
+
+    2. Use replace_text_in_section() when you have a unique section header
+       or marker but find_text itself is not unique across the document.
+       Example: replace the first "TBD" that appears after "## Status".
+
+    3. Use modify_doc_text() or batch_update_doc() with explicit
+       start_index / end_index when you need character-range precision.
+       Call inspect_doc_structure() first to discover indices.
+
     Args:
         user_google_email: User's Google email address
         document_id: ID of the document to update
-        find_text: Text to search for
+        find_text: Text to search for (literal string, not regex)
         replace_text: Text to replace with
         match_case: Whether to match case exactly
-        tab_id: Optional ID of the tab to target
+        tab_id: Optional ID of the tab to target (restricts replacement to
+            that tab; still replaces ALL occurrences within the tab)
 
     Returns:
         str: Confirmation message with replacement count
@@ -666,6 +684,192 @@ async def find_and_replace_doc(
 
     link = f"https://docs.google.com/document/d/{document_id}/edit"
     return f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
+
+
+@server.tool()
+@handle_http_errors("replace_text_in_section", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def replace_text_in_section(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    section_marker: str,
+    find_text: str,
+    replace_text: str,
+    occurrence: int = 1,
+    match_case: bool = False,
+    tab_id: Optional[str] = None,
+) -> str:
+    """
+    Replaces a single occurrence of find_text scoped to a specific section,
+    identified by a unique section_marker that appears earlier in the document.
+
+    Useful when find_text itself is not unique across the document, but you
+    can anchor on a unique heading, marker, or surrounding phrase.
+
+    How it works:
+    1. Reads the document text with Docs API indices.
+    2. Locates section_marker (the first occurrence).
+    3. Finds the Nth occurrence of find_text AFTER that marker (N=occurrence).
+    4. Replaces only that single occurrence using deleteContentRange + insertText.
+
+    Use cases:
+    - Update a version number inside a specific chapter without touching
+      identical version numbers elsewhere.
+    - Change the first "TBD" after a "## Status" heading.
+
+    Args:
+        user_google_email: User's Google email address.
+        document_id: ID of the document to update.
+        section_marker: A text marker that appears uniquely earlier in the
+            document (e.g., a heading). The FIRST occurrence is used as the
+            anchor — if this marker is not unique, the first match wins.
+        find_text: Text to find after the marker (literal, not regex).
+        replace_text: Text to replace it with.
+        occurrence: Which occurrence of find_text after the marker to replace
+            (1-based). Default 1 (first match). Raises if fewer matches exist.
+        match_case: Whether marker and find_text must match case exactly.
+        tab_id: Optional tab ID. If provided, search is limited to that tab.
+
+    Returns:
+        str: Confirmation message with the doc index range that was replaced.
+
+    Raises:
+        Exception: If section_marker is not found, or if fewer than
+            `occurrence` matches of find_text exist after the marker.
+    """
+    logger.info(
+        f"[replace_text_in_section] Doc={document_id}, marker='{section_marker}', "
+        f"find='{find_text}', replace='{replace_text}', occurrence={occurrence}, tab='{tab_id}'"
+    )
+
+    if occurrence < 1:
+        raise UserInputError(
+            f"occurrence must be >= 1 (got {occurrence})"
+        )
+    if not find_text:
+        raise UserInputError("find_text must be non-empty")
+
+    # Fetch document. includeTabsContent=True so tab bodies are populated when needed.
+    doc = await asyncio.to_thread(
+        service.documents()
+        .get(documentId=document_id, includeTabsContent=True)
+        .execute
+    )
+
+    # Select the body to search
+    if tab_id:
+        tabs = doc.get("tabs", [])
+        target_body = None
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                target_body = (
+                    tab.get("documentTab", {}).get("body", {}).get("content", [])
+                )
+                break
+        if target_body is None:
+            raise Exception(f"Tab '{tab_id}' not found in document {document_id}")
+        body_content = target_body
+    else:
+        body_content = doc.get("body", {}).get("content", [])
+
+    # Walk the body and build parallel arrays:
+    #   flat_chars     - Python characters (code points) as a list
+    #   doc_indices    - Docs API startIndex for each character
+    #   char_widths    - UTF-16 code-unit width of each character (1 or 2)
+    # Docs API indices are UTF-16 code-unit based, while Python str is code
+    # point based. Non-BMP chars (emoji, etc.) occupy 2 code units each.
+    flat_chars: List[str] = []
+    doc_indices: List[int] = []
+    char_widths: List[int] = []
+
+    def walk(elements: List[Dict[str, Any]]) -> None:
+        for element in elements:
+            if "paragraph" in element:
+                for pe in element["paragraph"].get("elements", []):
+                    text_run = pe.get("textRun")
+                    if not text_run:
+                        continue
+                    content = text_run.get("content", "")
+                    cursor = pe.get("startIndex", 0)
+                    for ch in content:
+                        width = 2 if ord(ch) >= 0x10000 else 1
+                        flat_chars.append(ch)
+                        doc_indices.append(cursor)
+                        char_widths.append(width)
+                        cursor += width
+            elif "table" in element:
+                for row in element["table"].get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        walk(cell.get("content", []))
+
+    walk(body_content)
+    flat_text = "".join(flat_chars)
+
+    # Apply case folding for search only; preserve original indices.
+    search_text = flat_text if match_case else flat_text.lower()
+    search_marker = section_marker if match_case else section_marker.lower()
+    search_find = find_text if match_case else find_text.lower()
+
+    # Locate the anchor marker.
+    marker_pos = search_text.find(search_marker)
+    if marker_pos < 0:
+        raise Exception(
+            f"Section marker '{section_marker}' not found in document {document_id}"
+            + (f" (tab '{tab_id}')" if tab_id else "")
+        )
+    search_start = marker_pos + len(section_marker)
+
+    # Walk to the Nth occurrence of find_text after the marker.
+    found = 0
+    find_flat_pos = -1
+    while found < occurrence:
+        next_pos = search_text.find(search_find, search_start)
+        if next_pos < 0:
+            raise Exception(
+                f"Only {found} occurrence(s) of '{find_text}' found after section marker "
+                f"'{section_marker}' — requested occurrence {occurrence}."
+            )
+        found += 1
+        if found == occurrence:
+            find_flat_pos = next_pos
+            break
+        search_start = next_pos + len(search_find)
+
+    # Map flat positions back to Docs API indices. doc_end is the index of
+    # the first code unit AFTER the matched range, so we add the last
+    # character's UTF-16 width (1 for BMP, 2 for non-BMP).
+    doc_start = doc_indices[find_flat_pos]
+    last_char_flat_idx = find_flat_pos + len(find_text) - 1
+    doc_end = doc_indices[last_char_flat_idx] + char_widths[last_char_flat_idx]
+
+    # Delete the existing range, then insert the replacement at the same start.
+    delete_range: Dict[str, Any] = {
+        "startIndex": doc_start,
+        "endIndex": doc_end,
+    }
+    insert_location: Dict[str, Any] = {"index": doc_start}
+    if tab_id:
+        delete_range["tabId"] = tab_id
+        insert_location["tabId"] = tab_id
+
+    requests = [
+        {"deleteContentRange": {"range": delete_range}},
+        {"insertText": {"location": insert_location, "text": replace_text}},
+    ]
+
+    await asyncio.to_thread(
+        service.documents()
+        .batchUpdate(documentId=document_id, body={"requests": requests})
+        .execute
+    )
+
+    link = f"https://docs.google.com/document/d/{document_id}/edit"
+    return (
+        f"Replaced occurrence {occurrence} of '{find_text}' with '{replace_text}' "
+        f"after section marker '{section_marker}' (doc index {doc_start}-{doc_end}) "
+        f"in document {document_id}. Link: {link}"
+    )
 
 
 @server.tool()
