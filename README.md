@@ -1586,6 +1586,35 @@ The credential store automatically handles credential serialization, expiry pars
 
 ---
 
+## <span style="color:#adbcbc">≡ Fork Extensions (GridWorld)</span>
+
+This fork adds the following tools and enhancements on top of upstream:
+
+### Google Sheets — Dimension & Revision Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_sheet_dimension_sizes` | Get pixel sizes of columns or rows in a sheet |
+| `auto_resize_sheet_dimensions` | Auto-resize columns/rows via `autoResizeDimensions` API |
+| `fit_columns_to_content` | Content-aware column width calculation (CJK-aware, font-size-aware) |
+| `list_spreadsheet_revisions` | List Drive revision history of a spreadsheet |
+
+### Google Sheets — Shared Drive Support
+
+`create_spreadsheet` accepts an optional `folder_id` parameter to create spreadsheets directly in a shared drive folder.
+
+### Google Docs — Shared Drive Support
+
+`create_doc` accepts an optional `folder_id` parameter to create documents directly in a shared drive folder.
+
+### Google Docs — Section-Scoped Text Replacement
+
+| Tool | Description |
+|------|-------------|
+| `replace_text_in_section` | Replace a specific occurrence of text after a section marker, avoiding false positives when the same text appears multiple times in a document |
+
+---
+
 ## <span style="color:#adbcbc">≡ License</span>
 
 MIT License - see `LICENSE` file for details.

@@ -9,7 +9,7 @@ import asyncio
 import io
 import inspect
 import re
-from typing import List, Any, Literal, Optional, Union
+from typing import List, Dict, Any, Literal, Optional, Union
 
 from typing_extensions import TypedDict
 
@@ -385,15 +385,31 @@ async def list_docs_in_folder(
     ),
 )
 @handle_http_errors("create_doc", service_type="docs")
-@require_google_service("docs", "docs_write")
+@require_multiple_services(
+    [
+        {
+            "service_type": "drive",
+            "scopes": "drive_file",
+            "param_name": "drive_service",
+        },
+        {
+            "service_type": "docs",
+            "scopes": "docs_write",
+            "param_name": "docs_service",
+        },
+    ]
+)
 async def create_doc(
-    service: Any,
+    drive_service: Any,
+    docs_service: Any,
     user_google_email: str,
     title: str,
     content: str = "",
+    folder_id: Optional[str] = None,
 ) -> str:
     """
     Creates a new Google Doc and optionally inserts initial content.
+    Supports creating in shared drives by specifying folder_id.
 
     After creation, the document body starts at index 1. A new empty doc
     has total length 2 (one section break at index 0, one newline at index 1).
@@ -407,36 +423,58 @@ async def create_doc(
         user_google_email: User's Google email address
         title: Title of the new document
         content: Optional initial plain text content to insert
+        folder_id: Optional Drive folder ID to create the doc in. Supports shared drives.
 
     Returns:
         str: Confirmation message with document ID, link, and initial document state.
     """
-    logger.info(f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}'")
+    logger.info(f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}', folder_id={folder_id}")
 
-    doc = await asyncio.to_thread(
-        service.documents().create(body={"title": title}).execute
-    )
-    doc_id = doc.get("documentId")
+    if folder_id:
+        from gdrive.drive_helpers import resolve_folder_id
+        resolved_folder_id = await resolve_folder_id(drive_service, folder_id)
+        file_metadata = {
+            "name": title,
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": [resolved_folder_id],
+        }
+        created_file = await asyncio.to_thread(
+            drive_service.files()
+            .create(
+                body=file_metadata,
+                fields="id, name, webViewLink, parents",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
+        doc_id = created_file.get("id")
+    else:
+        doc = await asyncio.to_thread(
+            docs_service.documents().create(body={"title": title}).execute
+        )
+        doc_id = doc.get("documentId")
+
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
         await asyncio.to_thread(
-            service.documents()
+            docs_service.documents()
             .batchUpdate(documentId=doc_id, body={"requests": requests})
             .execute
         )
     link = f"https://docs.google.com/document/d/{doc_id}/edit"
+    folder_info = f" in folder {folder_id}" if folder_id else ""
     if content:
         content_note = f"Initial content: {len(content)} characters inserted."
     else:
         content_note = "Document is empty (body starts at index 1, total length 2)."
     msg = (
-        f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. "
+        f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}{folder_info}. "
         f"{content_note} "
         f"Use batch_update_doc with end_of_segment=true to append content. "
         f"Link: {link}"
     )
     logger.info(
-        f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}"
+        f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}{folder_info}. Link: {link}"
     )
     return msg
 
@@ -790,6 +828,171 @@ async def find_and_replace_doc(
 
     link = f"https://docs.google.com/document/d/{document_id}/edit"
     return f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
+
+
+@server.tool()
+@handle_http_errors("replace_text_in_section", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def replace_text_in_section(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    section_marker: str,
+    find_text: str,
+    replace_text: str,
+    occurrence: int = 1,
+    match_case: bool = False,
+    tab_id: Optional[str] = None,
+) -> str:
+    """
+    Replaces a single occurrence of find_text scoped to a specific section,
+    identified by a unique section_marker that appears earlier in the document.
+
+    Useful when find_text itself is not unique across the document, but you
+    can anchor on a unique heading, marker, or surrounding phrase.
+
+    How it works:
+    1. Reads the document text with Docs API indices.
+    2. Locates section_marker (the first occurrence).
+    3. Finds the Nth occurrence of find_text AFTER that marker (N=occurrence).
+    4. Replaces only that single occurrence using deleteContentRange + insertText.
+
+    Use cases:
+    - Update a version number inside a specific chapter without touching
+      identical version numbers elsewhere.
+    - Change the first "TBD" after a "## Status" heading.
+
+    Args:
+        user_google_email: User's Google email address.
+        document_id: ID of the document to update.
+        section_marker: A text marker that appears uniquely earlier in the
+            document (e.g., a heading). The FIRST occurrence is used as the
+            anchor — if this marker is not unique, the first match wins.
+        find_text: Text to find after the marker (literal, not regex).
+        replace_text: Text to replace it with.
+        occurrence: Which occurrence of find_text after the marker to replace
+            (1-based). Default 1 (first match). Raises if fewer matches exist.
+        match_case: Whether marker and find_text must match case exactly.
+        tab_id: Optional tab ID. If provided, search is limited to that tab.
+
+    Returns:
+        str: Confirmation message with the doc index range that was replaced.
+    """
+    logger.info(
+        f"[replace_text_in_section] Doc={document_id}, marker='{section_marker}', "
+        f"find='{find_text}', replace='{replace_text}', occurrence={occurrence}, tab='{tab_id}'"
+    )
+
+    if occurrence < 1:
+        raise UserInputError(f"occurrence must be >= 1 (got {occurrence})")
+    if not find_text:
+        raise UserInputError("find_text must be non-empty")
+
+    doc = await asyncio.to_thread(
+        service.documents()
+        .get(documentId=document_id, includeTabsContent=True)
+        .execute
+    )
+
+    if tab_id:
+        tabs = doc.get("tabs", [])
+        target_body = None
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                target_body = (
+                    tab.get("documentTab", {}).get("body", {}).get("content", [])
+                )
+                break
+        if target_body is None:
+            raise Exception(f"Tab '{tab_id}' not found in document {document_id}")
+        body_content = target_body
+    else:
+        body_content = doc.get("body", {}).get("content", [])
+
+    flat_chars: List[str] = []
+    doc_indices: List[int] = []
+    char_widths: List[int] = []
+
+    def walk(elements: List[Dict[str, Any]]) -> None:
+        for element in elements:
+            if "paragraph" in element:
+                for pe in element["paragraph"].get("elements", []):
+                    text_run = pe.get("textRun")
+                    if not text_run:
+                        continue
+                    content = text_run.get("content", "")
+                    cursor = pe.get("startIndex", 0)
+                    for ch in content:
+                        width = 2 if ord(ch) >= 0x10000 else 1
+                        flat_chars.append(ch)
+                        doc_indices.append(cursor)
+                        char_widths.append(width)
+                        cursor += width
+            elif "table" in element:
+                for row in element["table"].get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        walk(cell.get("content", []))
+
+    walk(body_content)
+    flat_text = "".join(flat_chars)
+
+    search_text = flat_text if match_case else flat_text.lower()
+    search_marker = section_marker if match_case else section_marker.lower()
+    search_find = find_text if match_case else find_text.lower()
+
+    marker_pos = search_text.find(search_marker)
+    if marker_pos < 0:
+        raise Exception(
+            f"Section marker '{section_marker}' not found in document {document_id}"
+            + (f" (tab '{tab_id}')" if tab_id else "")
+        )
+    search_start = marker_pos + len(section_marker)
+
+    found = 0
+    find_flat_pos = -1
+    while found < occurrence:
+        next_pos = search_text.find(search_find, search_start)
+        if next_pos < 0:
+            raise Exception(
+                f"Only {found} occurrence(s) of '{find_text}' found after section marker "
+                f"'{section_marker}' — requested occurrence {occurrence}."
+            )
+        found += 1
+        if found == occurrence:
+            find_flat_pos = next_pos
+            break
+        search_start = next_pos + len(search_find)
+
+    doc_start = doc_indices[find_flat_pos]
+    last_char_flat_idx = find_flat_pos + len(find_text) - 1
+    doc_end = doc_indices[last_char_flat_idx] + char_widths[last_char_flat_idx]
+
+    delete_range: Dict[str, Any] = {
+        "startIndex": doc_start,
+        "endIndex": doc_end,
+    }
+    insert_location: Dict[str, Any] = {"index": doc_start}
+    if tab_id:
+        delete_range["tabId"] = tab_id
+        insert_location["tabId"] = tab_id
+
+    requests = [
+        {"deleteContentRange": {"range": delete_range}},
+        {"insertText": {"location": insert_location, "text": replace_text}},
+    ]
+
+    await asyncio.to_thread(
+        service.documents()
+        .batchUpdate(documentId=document_id, body={"requests": requests})
+        .execute
+    )
+
+    link = f"https://docs.google.com/document/d/{document_id}/edit"
+    return (
+        f"Replaced occurrence {occurrence} of '{find_text}' with '{replace_text}' "
+        f"after section marker '{section_marker}' (doc index {doc_start}-{doc_end}) "
+        f"in document {document_id}. Link: {link}"
+    )
 
 
 @server.tool(

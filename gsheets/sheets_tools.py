@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 
 from mcp.types import ToolAnnotations
 
-from auth.service_decorator import require_google_service
+from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
 from core.utils import handle_http_errors, UserInputError, StringList
 from core.comments import create_comment_tools
@@ -1190,26 +1190,43 @@ async def manage_conditional_formatting(
     ),
 )
 @handle_http_errors("create_spreadsheet", service_type="sheets")
-@require_google_service("sheets", "sheets_write")
+@require_multiple_services(
+    [
+        {
+            "service_type": "sheets",
+            "scopes": "sheets_write",
+            "param_name": "sheets_service",
+        },
+        {
+            "service_type": "drive",
+            "scopes": "drive_file",
+            "param_name": "drive_service",
+        },
+    ]
+)
 async def create_spreadsheet(
-    service,
+    sheets_service,
+    drive_service,
     user_google_email: str,
     title: str,
     sheet_names: Optional[StringList] = None,
+    folder_id: Optional[str] = None,
 ) -> str:
     """
     Creates a new Google Spreadsheet.
+    Supports creating in shared drives by specifying folder_id.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
         title (str): The title of the new spreadsheet. Required.
         sheet_names (Optional[List[str]]): List of sheet names to create. If not provided, creates one sheet with default name.
+        folder_id (Optional[str]): Drive folder ID to place the spreadsheet in. Supports shared drives.
 
     Returns:
         str: Information about the newly created spreadsheet including ID, URL, and locale.
     """
     logger.info(
-        f"[create_spreadsheet] Invoked. Email: '{user_google_email}', Title: {title}"
+        f"[create_spreadsheet] Invoked. Email: '{user_google_email}', Title: {title}, folder_id={folder_id}"
     )
 
     spreadsheet_body = {"properties": {"title": title}}
@@ -1220,7 +1237,7 @@ async def create_spreadsheet(
         ]
 
     spreadsheet = await asyncio.to_thread(
-        service.spreadsheets()
+        sheets_service.spreadsheets()
         .create(
             body=spreadsheet_body,
             fields="spreadsheetId,spreadsheetUrl,properties(title,locale)",
@@ -1233,13 +1250,29 @@ async def create_spreadsheet(
     spreadsheet_url = spreadsheet.get("spreadsheetUrl")
     locale = properties.get("locale", "Unknown")
 
+    if folder_id:
+        from gdrive.drive_helpers import resolve_folder_id
+        resolved_folder_id = await resolve_folder_id(drive_service, folder_id)
+        await asyncio.to_thread(
+            drive_service.files()
+            .update(
+                fileId=spreadsheet_id,
+                addParents=resolved_folder_id,
+                removeParents="root",
+                fields="id, parents",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
+
+    folder_info = f" in folder {folder_id}" if folder_id else ""
     text_output = (
-        f"Successfully created spreadsheet '{title}' for {user_google_email}. "
+        f"Successfully created spreadsheet '{title}' for {user_google_email}{folder_info}. "
         f"ID: {spreadsheet_id} | URL: {spreadsheet_url} | Locale: {locale}"
     )
 
     logger.info(
-        f"Successfully created spreadsheet for {user_google_email}. ID: {spreadsheet_id}"
+        f"Successfully created spreadsheet for {user_google_email}{folder_info}. ID: {spreadsheet_id}"
     )
     return text_output
 
@@ -2429,6 +2462,385 @@ async def move_sheet_rows(
     )
 
     logger.info(f"[move_sheet_rows] Moved {num_rows} rows for {user_google_email}")
+    return text_output
+
+
+@server.tool()
+@handle_http_errors("get_sheet_dimension_sizes", is_read_only=True, service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_sheet_dimension_sizes(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+) -> str:
+    """
+    Gets the pixel sizes of columns or rows in a Google Sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        dimension (str): Either "COLUMNS" or "ROWS". Required.
+        start_index (int): 0-based start index (A=0, B=1, ...). Required.
+        end_index (int): 0-based end index (exclusive). Required.
+
+    Returns:
+        str: The pixel sizes of each column or row in the specified range.
+    """
+    logger.info(
+        f"[get_sheet_dimension_sizes] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Dimension: {dimension}, Range: {start_index}-{end_index}"
+    )
+
+    dimension = dimension.upper()
+    if dimension not in ("COLUMNS", "ROWS"):
+        raise UserInputError("dimension must be 'COLUMNS' or 'ROWS'")
+    if start_index < 0 or end_index <= start_index:
+        raise UserInputError("start_index must be >= 0 and end_index must be > start_index")
+
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=False,
+            fields="sheets(properties(title,sheetId),columnGroups,rowGroups,data(columnMetadata,rowMetadata))",
+        )
+        .execute
+    )
+
+    target_sheet = None
+    for sheet in spreadsheet.get("sheets", []):
+        if sheet.get("properties", {}).get("title") == sheet_name:
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    data_list = target_sheet.get("data", [])
+    metadata_key = "columnMetadata" if dimension == "COLUMNS" else "rowMetadata"
+    metadata = []
+    for data in data_list:
+        metadata = data.get(metadata_key, [])
+        break
+
+    lines = []
+    label_prefix = "Column" if dimension == "COLUMNS" else "Row"
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    for i in range(start_index, end_index):
+        if i < len(metadata):
+            px = metadata[i].get("pixelSize", "(unknown)")
+        else:
+            px = "(default — not explicitly set)"
+
+        if dimension == "COLUMNS" and i < 26:
+            label = f"{label_prefix} {col_letters[i]} (index {i})"
+        else:
+            label = f"{label_prefix} {i}"
+        lines.append(f"  {label}: {px}px")
+
+    text_output = (
+        f"Dimension sizes for sheet '{sheet_name}' [{dimension}] "
+        f"index {start_index} to {end_index - 1}:\n" + "\n".join(lines)
+    )
+    logger.info(text_output)
+    return text_output
+
+
+@server.tool()
+@handle_http_errors("auto_resize_sheet_dimensions", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def auto_resize_sheet_dimensions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+) -> str:
+    """
+    Auto-resizes columns or rows to fit their content using the Sheets API autoResizeDimensions.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        dimension (str): Either "COLUMNS" or "ROWS". Required.
+        start_index (int): 0-based start index (A=0, B=1, ...). Required.
+        end_index (int): 0-based end index (exclusive). Required.
+
+    Returns:
+        str: Confirmation message of the successful auto-resize.
+    """
+    logger.info(
+        f"[auto_resize_sheet_dimensions] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Dimension: {dimension}, Range: {start_index}-{end_index}"
+    )
+
+    dimension = dimension.upper()
+    if dimension not in ("COLUMNS", "ROWS"):
+        raise UserInputError("dimension must be 'COLUMNS' or 'ROWS'")
+    if start_index < 0 or end_index <= start_index:
+        raise UserInputError("start_index must be >= 0 and end_index must be > start_index")
+
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title,sheetId))",
+        )
+        .execute
+    )
+    sheet_id = None
+    for sheet in spreadsheet.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == sheet_name:
+            sheet_id = props.get("sheetId")
+            break
+    if sheet_id is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    request_body = {
+        "requests": [
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": sheet_id,
+                        "dimension": dimension,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    }
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    label = "column(s)" if dimension == "COLUMNS" else "row(s)"
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if dimension == "COLUMNS" and end_index <= 26:
+        range_label = f"{col_letters[start_index]}-{col_letters[end_index - 1]}"
+    else:
+        range_label = f"index {start_index}-{end_index - 1}"
+
+    text_output = (
+        f"Successfully auto-resized {label} {range_label} to fit content "
+        f"in sheet '{sheet_name}' (spreadsheet {spreadsheet_id}) for {user_google_email}."
+    )
+    logger.info(text_output)
+    return text_output
+
+
+def _estimate_col_width(text: str, font_size: int, bold: bool) -> int:
+    """Estimate column pixel width based on font size and content (CJK-aware)."""
+    if not text:
+        return 0
+    pt_to_px = 1.333
+    char_height_px = font_size * pt_to_px
+    bold_factor = 1.1 if bold else 1.0
+    width = 0
+    for ch in text:
+        cp = ord(ch)
+        if (0x3000 <= cp <= 0x9FFF) or (0xF900 <= cp <= 0xFAFF) or (0xFF00 <= cp <= 0xFFEF):
+            width += char_height_px * bold_factor
+        else:
+            width += char_height_px * 0.6 * bold_factor
+    return int(width) + 16
+
+
+@server.tool()
+@handle_http_errors("fit_columns_to_content", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def fit_columns_to_content(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    start_col_index: int,
+    end_col_index: int,
+    check_rows: int = 100,
+    min_width: int = 50,
+    skip_empty: bool = True,
+) -> str:
+    """
+    Resizes column widths to fit their content by fetching cell values and font sizes,
+    then calculating accurate pixel widths. More reliable than autoResizeDimensions.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        sheet_name (str): The name of the sheet. Required.
+        start_col_index (int): 0-based start column index (A=0). Required.
+        end_col_index (int): 0-based end column index (exclusive). Required.
+        check_rows (int): Number of rows to scan for content. Defaults to 100.
+        min_width (int): Minimum column width in pixels. Defaults to 50.
+        skip_empty (bool): If True, skip columns with no content. Defaults to True.
+
+    Returns:
+        str: Summary of column widths applied.
+    """
+    logger.info(
+        f"[fit_columns_to_content] Invoked. Email: '{user_google_email}', "
+        f"Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}, "
+        f"Cols: {start_col_index}-{end_col_index}"
+    )
+
+    if start_col_index < 0 or end_col_index <= start_col_index:
+        raise UserInputError("start_col_index must be >= 0 and end_col_index must be > start_col_index")
+
+    col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def col_letter(i):
+        return col_letters[i] if i < 26 else str(i)
+
+    range_str = f"{sheet_name}!{col_letter(start_col_index)}1:{col_letter(end_col_index - 1)}{check_rows}"
+
+    spreadsheet = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            ranges=[range_str],
+            includeGridData=True,
+            fields=(
+                "sheets(properties(title,sheetId),"
+                "data(rowData(values(formattedValue,effectiveFormat(textFormat(fontSize,bold))))))"
+            ),
+        )
+        .execute
+    )
+
+    target_sheet = None
+    for sheet in spreadsheet.get("sheets", []):
+        if sheet.get("properties", {}).get("title") == sheet_name:
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+    sheet_id = target_sheet["properties"]["sheetId"]
+    num_cols = end_col_index - start_col_index
+    max_widths = [0] * num_cols
+
+    for row_data in target_sheet.get("data", [{}])[0].get("rowData", []):
+        for rel_idx, cell in enumerate(row_data.get("values", [])):
+            if rel_idx >= num_cols:
+                break
+            text = cell.get("formattedValue", "") or ""
+            fmt = cell.get("effectiveFormat", {}).get("textFormat", {})
+            font_size = fmt.get("fontSize") or 10
+            bold = fmt.get("bold", False)
+            w = _estimate_col_width(text, font_size, bold)
+            if w > max_widths[rel_idx]:
+                max_widths[rel_idx] = w
+
+    requests = []
+    skipped = []
+    applied = []
+
+    for rel_idx in range(num_cols):
+        abs_idx = start_col_index + rel_idx
+        label = col_letter(abs_idx)
+        if skip_empty and max_widths[rel_idx] == 0:
+            skipped.append(label)
+            continue
+        final_width = max(max_widths[rel_idx], min_width)
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": abs_idx,
+                    "endIndex": abs_idx + 1,
+                },
+                "properties": {"pixelSize": final_width},
+                "fields": "pixelSize",
+            }
+        })
+        applied.append(f"{label}:{final_width}px")
+
+    if requests:
+        await asyncio.to_thread(
+            service.spreadsheets()
+            .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+            .execute
+        )
+
+    lines = [f"fit_columns_to_content complete for sheet '{sheet_name}':"]
+    if applied:
+        lines.append("  Applied: " + ", ".join(applied))
+    if skipped:
+        lines.append("  Skipped (empty): " + ", ".join(skipped))
+
+    text_output = "\n".join(lines)
+    logger.info(text_output)
+    return text_output
+
+
+@server.tool()
+@handle_http_errors("list_spreadsheet_revisions", is_read_only=True, service_type="sheets")
+@require_google_service("drive", "drive_read")
+async def list_spreadsheet_revisions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    max_results: int = 10,
+) -> str:
+    """
+    Lists the revision history of a Google Spreadsheet using the Drive API.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        max_results (int): Maximum number of revisions to return (most recent first). Defaults to 10.
+
+    Returns:
+        str: Formatted list of revisions including time, modifier, and whether it was a named version.
+    """
+    logger.info(
+        f"[list_spreadsheet_revisions] Invoked. Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}"
+    )
+
+    response = await asyncio.to_thread(
+        service.revisions()
+        .list(
+            fileId=spreadsheet_id,
+            fields="revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress),keepForever,published)",
+        )
+        .execute
+    )
+
+    revisions = response.get("revisions", [])
+    if not revisions:
+        return f"No revisions found for spreadsheet {spreadsheet_id}."
+
+    revisions = list(reversed(revisions))[:max_results]
+
+    lines = []
+    for rev in revisions:
+        user_info = rev.get("lastModifyingUser", {})
+        name = user_info.get("displayName", "Unknown")
+        email = user_info.get("emailAddress", "")
+        modified = rev.get("modifiedTime", "Unknown")
+        rev_id = rev.get("id", "?")
+        lines.append(f"  Revision {rev_id} | {modified} | {name} <{email}>")
+
+    text_output = (
+        f"Revision history for spreadsheet {spreadsheet_id} "
+        f"(showing {len(lines)} most recent):\n" + "\n".join(lines)
+    )
+    logger.info(f"Listed {len(lines)} revisions for spreadsheet {spreadsheet_id}.")
     return text_output
 
 
